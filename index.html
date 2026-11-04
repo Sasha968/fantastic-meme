@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Мой Minecraft</title>
+<style>
+  body { margin: 0; overflow: hidden; font-family: monospace; }
+  #crosshair {
+    position: fixed; top: 50%; left: 50%;
+    width: 14px; height: 14px;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    background:
+      linear-gradient(#fff,#fff) 50%/2px 14px no-repeat,
+      linear-gradient(#fff,#fff) 50%/14px 2px no-repeat;
+  }
+  #info {
+    position: fixed; top: 10px; left: 10px;
+    color: white; background: rgba(0,0,0,0.5);
+    padding: 8px 12px; border-radius: 4px;
+    pointer-events: none; font-size: 13px;
+  }
+  #hotbar {
+    position: fixed; bottom: 10px; left: 50%;
+    transform: translateX(-50%);
+    display: flex; gap: 4px;
+    pointer-events: none;
+  }
+  .slot {
+    width: 50px; height: 50px;
+    border: 2px solid #555; background: rgba(0,0,0,0.5);
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-size: 12px;
+  }
+  .slot.active { border-color: white; }
+  .slot .num { position: absolute; top: 2px; left: 4px; font-size: 10px; }
+</style>
+</head>
+<body>
+<div id="crosshair"></div>
+<div id="info">Клик — начать. WASD — ходить, Space — прыжок, мышь — смотреть.<br>ЛКМ — ломать, ПКМ — ставить. 1-5 — выбор блока.</div>
+<div id="hotbar"></div>
+
+<script type="module">
+import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+import { PointerLockControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/PointerLockControls.js';
+
+// ===== Шум Перлина (простой) =====
+function hash(x, y) {
+  let n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+function smoothNoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const a = hash(xi, yi), b = hash(xi+1, yi);
+  const c = hash(xi, yi+1), d = hash(xi+1, yi+1);
+  const u = xf*xf*(3-2*xf), v = yf*yf*(3-2*yf);
+  return a*(1-u)*(1-v) + b*u*(1-v) + c*(1-u)*v + d*u*v;
+}
+function noise(x, y) {
+  return smoothNoise(x*0.1, y*0.1)*0.6 + smoothNoise(x*0.2, y*0.2)*0.3 + smoothNoise(x*0.4, y*0.4)*0.1;
+}
+
+// ===== Сцена =====
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+scene.fog = new THREE.Fog(0x87ceeb, 20, 60);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(16, 20, 16);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+sun.position.set(50, 100, 30);
+scene.add(sun);
+
+const controls = new PointerLockControls(camera, document.body);
+document.body.addEventListener('click', () => controls.lock());
+
+// ===== Блоки =====
+const BLOCK_TYPES = ['grass', 'dirt', 'stone', 'wood', 'leaves'];
+const BLOCK_COLORS = {
+  grass: '#6ab04c', dirt: '#8b5a2b', stone: '#888',
+  wood: '#6b4423', leaves: '#2d7a2d'
+};
+
+function makeTex(color) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 16;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = color; ctx.fillRect(0,0,16,16);
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  for (let i=0;i<20;i++) ctx.fillRect(Math.random()*16|0, Math.random()*16|0, 2, 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.15)';
+  for (let i=0;i<10;i++) ctx.fillRect(Math.random()*16|0, Math.random()*16|0, 1, 1);
+  return new THREE.CanvasTexture(c);
+}
+const materials = {};
+for (const t of BLOCK_TYPES) {
+  materials[t] = new THREE.MeshLambertMaterial({ map: makeTex(BLOCK_COLORS[t]) });
+}
+
+const geometry = new THREE.BoxGeometry(1, 1, 1);
+const blocks = new Map(); // "x,y,z" -> { mesh, type }
+const key = (x,y,z) => `${x},${y},${z}`;
+
+function addBlock(x, y, z, type) {
+  const k = key(x,y,z);
+  if (blocks.has(k)) return;
+  const mesh = new THREE.Mesh(geometry, materials[type]);
+  mesh.position.set(x, y, z);
+  scene.add(mesh);
+  blocks.set(k, { mesh, type });
+}
+function removeBlock(k) {
+  const b = blocks.get(k);
+  if (!b) return;
+  scene.remove(b.mesh);
+  blocks.delete(k);
+}
+
+// ===== Генерация мира =====
+const SIZE = 32;
+const heightMap = {};
+for (let x = 0; x < SIZE; x++) {
+  for (let z = 0; z < SIZE; z++) {
+    const h = Math.floor(noise(x, z) * 6) + 2;
+    heightMap[`${x},${z}`] = h;
+    for (let y = 0; y <= h; y++) {
+      const type = y === h ? 'grass' : y > h-3 ? 'dirt' : 'stone';
+      addBlock(x, y, z, type);
+    }
+  }
+}
+// Деревья
+for (let i = 0; i < 8; i++) {
+  const tx = 3 + Math.floor(Math.random() * (SIZE-6));
+  const tz = 3 + Math.floor(Math.random() * (SIZE-6));
+  const h = heightMap[`${tx},${tz}`];
+  for (let y = 1; y <= 4; y++) addBlock(tx, h+y, tz, 'wood');
+  for (let dx = -2; dx <= 2; dx++)
+    for (let dz = -2; dz <= 2; dz++)
+      for (let dy = 3; dy <= 5; dy++) {
+        if (Math.abs(dx) === 2 && Math.abs(dz) === 2) continue;
+        if (dx === 0 && dz === 0 && dy < 4) continue;
+        addBlock(tx+dx, h+dy, tz+dz, 'leaves');
+      }
+}
+
+// ===== Подсветка блока =====
+const highlight = new THREE.Mesh(
+  new THREE.BoxGeometry(1.02, 1.02, 1.02),
+  new THREE.MeshBasicMaterial({ color: 0x000000, wireframe: true, transparent: true, opacity: 0.5 })
+);
+highlight.visible = false;
+scene.add(highlight);
+
+// ===== Физика =====
+const velocity = new THREE.Vector3();
+let onGround = false;
+const PLAYER_HEIGHT = 1.7;
+
+function isBlockAt(x, y, z) {
+  return blocks.has(key(Math.floor(x), Math.floor(y), Math.floor(z)));
+}
+
+// ===== Инвентарь =====
+let selectedSlot = 0;
+const hotbar = document.getElementById('hotbar');
+BLOCK_TYPES.forEach((t, i) => {
+  const slot = document.createElement('div');
+  slot.className = 'slot' + (i === 0 ? ' active' : '');
+  slot.style.background = BLOCK_COLORS[t];
+  slot.innerHTML = `<span class="num">${i+1}</span>${t}`;
+  hotbar.appendChild(slot);
+});
+function selectSlot(i) {
+  selectedSlot = i;
+  [...hotbar.children].forEach((s, j) => s.classList.toggle('active', j === i));
+}
+addEventListener('keydown', e => {
+  if (e.code.startsWith('Digit')) {
+    const n = parseInt(e.code.slice(5)) - 1;
+    if (n >= 0 && n < BLOCK_TYPES.length) selectSlot(n);
+  }
+});
+
+// ===== Сохранение =====
+function saveWorld() {
+  const data = [...blocks.entries()].map(([k, b]) => [k, b.type]);
+  localStorage.setItem('mc-world', JSON.stringify(data));
+}
+function loadWorld() {
+  const raw = localStorage.getItem('mc-world');
+  if (!raw) return false;
+  for (const [k, type] of JSON.parse(raw)) {
+    const [x,y,z] = k.split(',').map(Number);
+    addBlock(x, y, z, type);
+  }
+  return true;
+}
+// Если хочешь сохранение — раскомментируй:
+// if (!loadWorld()) { /* генерация уже сделана выше */ }
+// setInterval(saveWorld, 5000);
+
+// ===== Управление =====
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup',   e => { keys[e.code] = false; });
+
+const raycaster = new THREE.Raycaster();
+raycaster.far = 6;
+
+function getTargetBlock() {
+  raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+  const meshes = [...blocks.values()].map(b => b.mesh);
+  const hits = raycaster.intersectObjects(meshes);
+  return hits[0] || null;
+}
+
+addEventListener('mousedown', e => {
+  if (!controls.isLocked) return;
+  const hit = getTargetBlock();
+  if (!hit) return;
+  const b = hit.object;
+  const k = key(b.position.x, b.position.y, b.position.z);
+  if (e.button === 0) {
+    removeBlock(k);
+  } else if (e.button === 2) {
+    const n = hit.face.normal;
+    const nx = b.position.x + n.x;
+    const ny = b.position.y + n.y;
+    const nz = b.position.z + n.z;
+    // Не ставить в себя
+    const px = Math.floor(camera.position.x);
+    const py1 = Math.floor(camera.position.y);
+    const py2 = Math.floor(camera.position.y - PLAYER_HEIGHT);
+    const pz = Math.floor(camera.position.z);
+    if ((nx===px && nz===pz) && (ny===py1 || ny===py2)) return;
+    addBlock(nx, ny, nz, BLOCK_TYPES[selectedSlot]);
+  }
+});
+addEventListener('contextmenu', e => e.preventDefault());
+
+// ===== Главный цикл =====
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.1);
+
+  if (controls.isLocked) {
+    // Горизонтальное движение
+    const speed = 5;
+    const dir = new THREE.Vector3();
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    forward.y = 0; forward.normalize();
+    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0,1,0));
+
+    if (keys['KeyW']) dir.add(forward);
+    if (keys['KeyS']) dir.sub(forward);
+    if (keys['KeyD']) dir.add(right);
+    if (keys['KeyA']) dir.sub(right);
+    if (dir.length() > 0) dir.normalize();
+
+    // Гравитация
+    velocity.y -= 20 * dt;
+    if (keys['Space'] && onGround) velocity.y = 8;
+
+    // Движение по X
+    const nx = camera.position.x + dir.x * speed * dt;
+    const feetY = camera.position.y - PLAYER_HEIGHT;
+    const headY = camera.position.y - 0.2;
+    if (!isBlockAt(nx, feetY, camera.position.z) && !isBlockAt(nx, headY, camera.position.z))
+      camera.position.x = nx;
+
+    // Движение по Z
+    const nz = camera.position.z + dir.z * speed * dt;
+    if (!isBlockAt(camera.position.x, feetY, nz) && !isBlockAt(camera.position.x, headY, nz))
+      camera.position.z = nz;
+
+    // Движение по Y
+    const ny = camera.position.y + velocity.y * dt;
+    onGround = false;
+    if (velocity.y < 0) {
+      if (isBlockAt(camera.position.x, ny - PLAYER_HEIGHT, camera.position.z)) {
+        velocity.y = 0;
+        camera.position.y = Math.floor(ny - PLAYER_HEIGHT) + 1 + PLAYER_HEIGHT;
+        onGround = true;
+      } else {
+        camera.position.y = ny;
+      }
+    } else {
+      if (isBlockAt(camera.position.x, ny, camera.position.z)) {
+        velocity.y = 0;
+      } else {
+        camera.position.y = ny;
+      }
+    }
+
+    // Не упасть в бездну
+    if (camera.position.y < -10) {
+      camera.position.set(16, 20, 16);
+      velocity.set(0,0,0);
+    }
+  }
+
+  // Подсветка
+  const hit = getTargetBlock();
+  if (hit && controls.isLocked) {
+    highlight.visible = true;
+    highlight.position.copy(hit.object.position);
+  } else {
+    highlight.visible = false;
+  }
+
+  renderer.render(scene, camera);
+}
+animate();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
